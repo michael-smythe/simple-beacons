@@ -150,10 +150,11 @@ int cmdshell(SSL *ssl) {
   ssl_readall(ssl, buf, sizeof(buf), &total_recv);
   printf("Remote Shell Activated At: %s", buf);
 
-  // Start a command loop -- interactive commands like vim, tmux, top, bash, ect will likely cause problems.
-  //  this is because the data on the remote end is being fed to popen in a single pass. Will have to confirm later.
+  // Start a command loop -- interactive commands like vim, tmux, top, bash, will hang the terminal.
+  //  this is because I am using a unidirectional pipe provided by popen. Could consider pipe, fork, exec later.
   while (1) {
     printf("sbsh> ");
+
     fgets((char *)msg, sizeof(msg), stdin);
     if (strcmp((char *)msg, "exit\n") == 0) {
       ssl_writeall(ssl, msg, sizeof(msg), &total_sent);
@@ -170,14 +171,17 @@ int cmdshell(SSL *ssl) {
       break;
     }
     memset(msg, 0, sizeof(msg));
+
     while((res = ssl_readall(ssl, buf, sizeof(buf), &total_recv)) > 0) {
-      if (res == 1 && strcmp((char *)&buf[0],"\0") == 0) {
+      //if (res == 1 && strcmp((char *)&buf[0],"\0") == 0) {
+      if (strlen((char *)buf) == 0) {
+        SSL_read(ssl, buf, 1);
+        memset(buf, 0, sizeof(buf));
         break;
       }
       printf("%s", buf);
       memset(buf, 0, sizeof(buf));
     }
-    memset(buf, 0, sizeof(buf));
   }
 
   return exit;
