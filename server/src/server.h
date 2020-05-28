@@ -18,6 +18,7 @@
 #include <netinet/tcp.h>
 #include <stdlib.h>
 #include <getopt.h>
+#include <sys/poll.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 

@@ -386,10 +386,8 @@ int entersession(SSL *ssl, char *auth) { // threadable
   int bytes, sd, exit = 0;
 
   // Accept the inbound SSL connection
-  if (SSL_accept(ssl) != 1) {                                   
-    ERR_print_errors_fp(stderr);
-    exit = -1;
-    goto cleanup;
+  while(SSL_accept(ssl) != 1) {                                   
+    continue;
   }
   
   SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
@@ -598,9 +596,9 @@ int main(int argc, char **argv) {
     socklen_t peerlen;                      // The peerlen message that is required for printing out peer info.
     char ipstr[INET6_ADDRSTRLEN];           // The ip address string for the peer -- is large enough to hold the max IPv6 length address.
     int keepalive = 1;
-    int keepcnt = 5;
-    int keepidle = 30; 
-    int keepintvl = 120;
+    int keepcnt = 3;
+    int keepidle = 5; 
+    int keepintvl = 15;
 
     // Ensure the user is running as root
     if(getuid() != 0) {

