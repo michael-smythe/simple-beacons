@@ -20,6 +20,7 @@
 #include <getopt.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <ctype.h>
 
 #define FAILURE -1
 

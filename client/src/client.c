@@ -25,6 +25,7 @@ int cmdshell(SSL *);
 int getfile(SSL *);
 int putfile(SSL *);
 void displayhelp(void);
+void trim(char *);
 int cmdloop(SSL *);
 int entersession(SSL *, char *);
 ssize_t ssl_readall(SSL *, uint8_t *, size_t, size_t *);
@@ -138,6 +139,13 @@ void loadcert(SSL_CTX* ctx, char *cert, char *key) {
 // Spawn a new connection immediately
 int newconn(SSL *ssl) {
   
+  char addr[INET6_ADDRSTRLEN];
+  char port[6]
+  
+  // Send the command to the remote server
+  ssl_writeall(ssl, (uint8_t *)"1", 2, &total_sent);
+
+
 }
 */
 // Enter into a remote shell
@@ -201,12 +209,12 @@ int getfile(SSL *ssl) {
   size_t total_recv = 0, total_sent = 0, written = 0;
 
   printf("Enter the remote file path: ");
-  fgets((char *)remotepath, 4096, stdin);
-  remotepath[strcspn((char *)remotepath, "\r\n")] = 0;
+  fgets((char *)remotepath, sizeof(remotepath), stdin);
+  trim((char *)remotepath);
 
   printf("Enter the local file path: ");
-  fgets((char *)localpath, 4096, stdin);
-  localpath[strcspn((char *)localpath, "\r\n")] = 0;
+  fgets((char *)localpath, sizeof(localpath), stdin);
+  trim((char *)localpath);
 
   // Create or open the local file 
   if ((fd = open((char *)localpath, O_WRONLY | O_APPEND | O_CREAT, 0644)) == -1) {
@@ -262,12 +270,12 @@ int putfile(SSL *ssl) {
   size_t total_recv = 0, total_sent = 0, total_read = 0;
 
   printf("Enter the local file path: ");
-  fgets((char *)localpath, 4096, stdin);
-  localpath[strcspn((char *)localpath, "\r\n")] = 0;
+  fgets((char *)localpath, sizeof(localpath), stdin);
+  trim((char *)localpath);
 
   printf("Enter the remote file path: ");
-  fgets((char *)remotepath, 4096, stdin);
-  remotepath[strcspn((char *)remotepath, "\r\n")] = 0;
+  fgets((char *)remotepath, sizeof(remotepath), stdin);
+  trim((char *)remotepath);
 
   // Create or open the local file 
   if ((fd = open((char *)localpath, O_RDONLY)) == -1) {
@@ -518,6 +526,18 @@ ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
   }
 
   return w;
+}
+
+void trim(char *str) {
+  int i = 0, index = -1;
+
+  while(str[i] != '\0') {
+    if(!isspace(str[i])) {
+      index = i;
+    }
+    i++;
+  }
+  str[index+1] = '\0';
 }
 
 int parseargs(int argc, char **argv, char **auth, int *port) {

