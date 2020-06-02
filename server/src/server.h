@@ -55,8 +55,8 @@ int resolveandconnect(int *, int8_t *, int);
 // int setuplistener(int, int*);
 ssize_t ssl_readall(SSL *, uint8_t *, size_t);
 ssize_t ssl_writeall(SSL *, uint8_t *, size_t);
-ssize_t readall(int, uint8_t *, size_t, size_t *);
-ssize_t writeall(int, uint8_t *, size_t, size_t *);
+ssize_t readall(int, uint8_t *, size_t);
+ssize_t writeall(int, uint8_t *, size_t);
 SSL_CTX* initCTX(void);
 
 #endif /* SBS_H */

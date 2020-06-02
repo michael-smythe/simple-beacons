@@ -50,8 +50,8 @@ int setuplistner(int, int *);
 int parseargs(int, char **, char **, int *);
 ssize_t ssl_readall(SSL *, uint8_t *, size_t);
 ssize_t ssl_writeall(SSL *, uint8_t *, size_t);
-ssize_t writeall(int, uint8_t *, size_t, size_t *);
-ssize_t readall(int, uint8_t *, size_t, size_t *);
+ssize_t writeall(int, uint8_t *, size_t);
+ssize_t readall(int, uint8_t *, size_t);
 void loadcert(SSL_CTX *, char *, char *);
 SSL_CTX* initCTX(void);
 

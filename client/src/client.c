@@ -34,7 +34,7 @@ int entersession(SSL *ssl, char *auth) {
   printf("[+] Connected with %s encryption\n", SSL_get_cipher(ssl));
 
   // Read the message sent which should be a request to authenticate "authenticate" is passed.
-  if ((ssl_readall(ssl, buf, sizeof(buf)) < 0)) {     
+  if ((ssl_readall(ssl, buf, 3) < 0)) {     
     exit = FAIL;
     goto cleanup;
   }         
@@ -47,11 +47,9 @@ int entersession(SSL *ssl, char *auth) {
 
   // Send the authentication message
   printf("[*] Authenticating with: %s\n", auth);
-  if (ssl_writeall(ssl, (uint8_t *)auth, strlen(auth)) < 0) {
-    exit = FAIL;
-    goto cleanup;
-  }
-  if (ssl_writeall(ssl, (uint8_t *)"", 1) < 0) {
+  memset(buf, 0, sizeof(buf));
+  sprintf((char *)buf, "%s", auth);
+  if (ssl_writeall(ssl, buf, sizeof(buf)) < 0) {
     exit = FAIL;
     goto cleanup;
   }
@@ -60,7 +58,7 @@ int entersession(SSL *ssl, char *auth) {
   // Check to make sure the server is happy with the auth message
   //  3 shots at getting the right message else server initiates disconnect.
   memset(buf, 0, sizeof(buf));
-  if ((ssl_readall(ssl, buf, sizeof(buf))) < 0) {
+  if (ssl_readall(ssl, buf, 3) < 0) {
     fprintf(stderr, "[-] Error reading from the server. Exiting now.\n");
     exit = FAIL;
     goto cleanup;
@@ -421,9 +419,9 @@ int putfile(SSL *ssl) {
 int tunnel(SSL *ssl) {
   int efd;
   uint8_t ans[16] = {0};
-  char type[12] = {0};
-  char lport[12] = {0};
-  char dport[12] = {0};
+  char type[9] = {0};
+  char lport[7] = {0};
+  char dport[7] = {0};
   char addr[INET6_ADDRSTRLEN] = {0};
 
   // Check which type of tunnel we want to setup
@@ -445,7 +443,7 @@ int tunnel(SSL *ssl) {
   //clearstdin();
 
   // Grab the port we want to aim our tunnel at
-  printf("Enter the desitnation IP address: ");
+  printf("Enter the desitnation port: ");
   fgets(dport, sizeof(dport), stdin);
   trim(dport);
   //clearstdin();
@@ -496,7 +494,7 @@ int tunnel(SSL *ssl) {
  */ 
 int forward_tunnel(SSL *ssl, int efd, char *lport, char *dport, char *addr) {
   int res;
-  int r, x, y;
+  int len;
   int tunport;
   int sfd, ffd;
   int keepcnt = 5;
@@ -505,9 +503,6 @@ int forward_tunnel(SSL *ssl, int efd, char *lport, char *dport, char *addr) {
   int keepalive = 1;
   int n, max = 128;
   int ssl_fd = SSL_get_fd(ssl);
-  //size_t readin = 0;
-  //size_t written = 0;
-  uint8_t tmp[8] = {0};
   uint8_t ans[16] = {0};
   uint8_t buf[4096] = {0};
   char tunaddr[INET6_ADDRSTRLEN];
@@ -530,8 +525,8 @@ int forward_tunnel(SSL *ssl, int efd, char *lport, char *dport, char *addr) {
   }
 
   // Tell the server which address and port to point the tunnel at
-  if (ssl_writeall(ssl, (uint8_t *)addr, strlen(addr) + 1) < 0) {return FAIL;}
-  if (ssl_writeall(ssl, (uint8_t *)dport, strlen(dport) + 1) < 0) {return FAIL;}
+  if (ssl_writeall(ssl, (uint8_t *)addr, 46) < 0) {return FAIL;}
+  if (ssl_writeall(ssl, (uint8_t *)dport, 7) < 0) {return FAIL;}
 
   // Setup the listner
   if (setuplistner(atoi(lport), &sfd) != SUCCESS) {return FAIL;}
@@ -632,8 +627,12 @@ int forward_tunnel(SSL *ssl, int efd, char *lport, char *dport, char *addr) {
       } 
       // This branch handles incoming data from the target to the tunnel
       else if (ffd == events[i].data.fd) {
+        // Clear the buffers
         memset(buf, 0, sizeof(buf));
+        memset(ans, 0, sizeof(ans));
+        // Read in the messages from the connected socket
         res = read(ffd, buf, sizeof(buf));
+        // Check for errors or disconnected clients
         if (res < 0) {
           if (errno != EAGAIN || errno != EWOULDBLOCK) {
             goto loop_fail;
@@ -645,36 +644,27 @@ int forward_tunnel(SSL *ssl, int efd, char *lport, char *dport, char *addr) {
           close(ffd);
           continue;
         }
-        printf("[+] About to send %d bytes.\n", res);
-        fwrite(buf, 1, res, stdout);
-        memset(tmp, 0, sizeof(tmp));
-        sprintf((char *)tmp, "%d", res);
+        // Tell the client we are still connected
         if (ssl_writeall(ssl, (uint8_t *)"512", 4) < 0) {goto loop_fail;}
-        if (ssl_writeall(ssl, (uint8_t *)tmp, sizeof(tmp)) < 0) {goto loop_fail;}
-        printf("[+] SEND TO SERVER BUFFER: %s", buf);
+        // Tell the servedr the expected size of the incoming message
+        printf("[+] Sending %d bytes to the target.\n", res);
+        sprintf((char *)ans, "%d", res);
+        if (ssl_writeall(ssl, (uint8_t *)ans, sizeof(ans)) < 0) {goto loop_fail;}
+        // Deliver the message
         if (ssl_writeall(ssl, buf, res) < 0) {goto loop_fail;}
       } 
       // This branch handles incoming data from the client side tunnel target
       else if (ssl_fd == events[i].data.fd) {
+        // Clear the buffers
         memset(buf, 0, sizeof(buf));
-        r = 0;
-        r = SSL_read(ssl, buf, sizeof(buf));
-        fwrite(buf, 1, sizeof(buf), stdout);
-        printf("\n");
-        while (r > 0) {
-          x = 0;
-          while(x < r) {
-            y = write(ffd, buf + x, r - 1);
-            if (y == -1) {
-              if (errno != EAGAIN || errno != EWOULDBLOCK) {
-                continue;
-              } else {
-                y = 0;
-              }
-            }
-            x += y;
-          }
-        }
+        memset(ans, 0, sizeof(ans));
+        // Read into memory the size of message
+        ssl_readall(ssl, ans, sizeof(ans));
+        len = atoi((char *)ans);
+        // Echo the messages from the target back to our connected socket
+        printf("[+] Recieved %d bytes from target.\n", len);
+        ssl_readall(ssl, buf, len);
+        writeall(ffd, buf, len);
       } 
       // We should never hit this branch but if we do just see if we can carry on.
       else {  
@@ -894,17 +884,14 @@ ssize_t ssl_readall(SSL *ssl, uint8_t *buf, size_t len) {
 
     while (recvd < len) {
       r = SSL_read(ssl, &buf[recvd], len-recvd);
-      if (r < 0) {
-        perror("[-] ERROR: SSL_read encountered and error");
-        break;
-      } else if (r == 0) {
-        break;
-      } else {
-        recvd += r;
-        if (strcmp((char *)&buf[recvd-1], (char *)"\0") == 0) {
-          break;
+      if (r <= 0) {
+        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_READ) {
+          continue;
         }
+        perror("[-] ERROR: SSL_read encountered and error");
+        return FAIL;
       }
+      recvd += r;
     }
     return r;
 }
@@ -917,9 +904,12 @@ ssize_t ssl_writeall(SSL *ssl, uint8_t *msg, size_t len) {
   size_t sent = 0;
 
   while (sent < len) {
-    if ((s = SSL_write(ssl,  &msg[sent], len-sent)) < 0) {
-      perror("[-] ERROR: SSL_write encountered an error");
-      break;
+    if ((s = SSL_write(ssl,  &msg[sent], len-sent)) <= 0) {
+      if (SSL_get_error(ssl, s) == SSL_ERROR_WANT_WRITE) {
+        continue;
+      }
+      perror("[-] ERROR: SSL_write encountered and error");
+      return FAIL;
     }
     sent += s;
   }
@@ -930,15 +920,17 @@ ssize_t ssl_writeall(SSL *ssl, uint8_t *msg, size_t len) {
 /**
  * Helper function to ensure the entire buffer is read from a traditional fd socket
  */
-ssize_t readall(int fd, uint8_t *buf, size_t len, size_t *total_read) {
+ssize_t readall(int fd, uint8_t *buf, size_t len) {
   ssize_t r = 0;
   size_t readin = 0;
 
   while(readin < len) {
     if ((r = read(fd, &buf[readin], len-readin)) <= 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        continue;
+      }
       break;
     }
-    (*total_read) +=r;
     readin += r;
   }
 
@@ -948,7 +940,7 @@ ssize_t readall(int fd, uint8_t *buf, size_t len, size_t *total_read) {
 /**
  * Helper function to ensure the entire buffer is written to a traditional fd socket
  */
-ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
+ssize_t writeall(int fd, uint8_t *buf, size_t len) {
   ssize_t w = 0;
   size_t written = 0;
   
@@ -959,7 +951,6 @@ ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
     } else if (w == 0) {
       break;
     }
-    (*total_written) += w;
     written += w;
   }
 

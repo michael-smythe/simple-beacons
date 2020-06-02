@@ -215,7 +215,7 @@ int tunnel(SSL *ssl) {
   if (ssl_writeall(ssl, (uint8_t *)"500", 4) < 0) {return FAIL;}
 
   // Determine if the client wants to setup a forward or reverse tunnel
-  if (ssl_readall(ssl, ans, sizeof(ans)) < 0) {return FAIL;}
+  if (ssl_readall(ssl, ans, 3) < 0) {return FAIL;}
 
   // First branch is a forward tunnel
   if (strcmp((char *)ans, "51") == 0) { 
@@ -246,14 +246,12 @@ int tunnel(SSL *ssl) {
 int forward_tunnel(SSL *ssl, int efd) {
   int sfd;
   int res;
-  int r, x, y;
+  int r;
   int n, max = 128;
   int ssl_fd = SSL_get_fd(ssl);
-  //size_t readin = 0;
-  //size_t written = 0;
-  uint8_t ans[64] = {0};
+  uint8_t ans[16] = {0};
   uint8_t buf[4096] = {0};
-  char port[6];
+  char port[7];
   char addr[INET6_ADDRSTRLEN];
   struct epoll_event event;
   struct epoll_event *events;
@@ -269,10 +267,9 @@ int forward_tunnel(SSL *ssl, int efd) {
 
   // Read in the target address and port from the client.
   if (ssl_readall(ssl, (uint8_t *)addr, sizeof(addr)) < 0) {return FAIL;}
-  printf("[*] Address of %s\n", addr);
+  /////printf("[*] Address of %s\n", addr);
   if (ssl_readall(ssl, (uint8_t *)port, sizeof(port)) < 0) {return FAIL;}
-  printf("[*] port of %s\n", port);
-
+  /////printf("[*] port of %s\n", port);
 
   // Register the default descriptor to track - ssl in this case
   event.data.fd = ssl_fd;
@@ -295,12 +292,10 @@ int forward_tunnel(SSL *ssl, int efd) {
         // Check to see the state of the socket on the client side 1) new, 2) connected, 3) shutdown.
         memset(ans, 0, sizeof(ans));
         if (ssl_readall(ssl, ans, 4) < 0) {return FAIL;}
-        printf("the answer is %s\n", ans);
         // This branch handles new connections
         if (strcmp((char *)ans, "511") == 0) { 
           // Connect to the target address and register/add the resulting fd to the event list          
           if (resolveandconnect(&sfd, (int8_t *)&addr, atoi(port)) != SUCCESS) {return FAIL;}
-          printf("[+] Connected to peer\n");
           memset(&event, 0, sizeof(event));
           event.data.fd = sfd;
           event.events = EPOLLIN | EPOLLET;
@@ -308,22 +303,20 @@ int forward_tunnel(SSL *ssl, int efd) {
         } 
         // This branch handles established connections
         else if (strcmp((char *)ans, "512") == 0) {
+          // Clear the buffers.
           memset(buf, 0, sizeof(buf));
-          if (ssl_readall(ssl, buf, 8) < 0) {return FAIL;}
+          memset(ans, 0, sizeof(ans));
+          // Check the size of the incoming message
+          if (ssl_readall(ssl, buf, sizeof(ans)) < 0) {return FAIL;}
           res = atoi((char *)buf);
-          printf("[*] About to recieve %d bytes\n", res);
-          printf("[+] Writing to peer!\n");
-          // echo all data recieved from clients side back to remote side   
+          // Read the size of the message into the buffer and echo to the target
           memset(buf, 0, sizeof(buf));
           if (ssl_readall(ssl, buf, res) < 0) {return FAIL;}
-          printf("[+] RECIEVE FROM CLIENT BUFFER: ");
-          fwrite(buf, 1, res, stdout);
-          if (write(sfd, buf, sizeof(buf)) < 0) {continue;}
+          if (writeall(sfd, buf, res) < 0) {continue;}
         } 
         // This branch handles shutting down connections
         else if (strcmp((char *)ans, "513") == 0) {
           // Remove the fd for the connected socket and close down the fd indicated. 
-          if (epoll_ctl(efd, EPOLL_CTL_DEL, sfd, &event) == -1) {return FAIL;}
           close(sfd);
           continue;
         } 
@@ -340,24 +333,15 @@ int forward_tunnel(SSL *ssl, int efd) {
       }
       // This branch handles incoming data from the tunnel target 
       else if (sfd == events[i].data.fd) {
+        // Clear the buffers
         memset(buf, 0, sizeof(buf));
-        r = 0;
+        memset(ans, 0, sizeof(ans));
+        // Read the size of the message
         r = read(sfd, buf, sizeof(buf));
-        fwrite(buf, 1, sizeof(buf), stdout);
-        while (r > 0) {
-          x = 0;
-          while(x < r) {
-            y = SSL_write(ssl, buf + x, r - i);
-            if (y == -1) {
-              if (errno != EAGAIN || errno != EWOULDBLOCK) {
-                continue;
-              } else {
-                y = 0;
-              }
-              x += y;
-            }
-          }
-        }
+        sprintf((char *)ans, "%d", r);
+        // Echo the target messages back to the client.
+        ssl_writeall(ssl, ans, sizeof(ans));
+        ssl_writeall(ssl, buf, (size_t)r);
       } 
       // We should never hit this branch but if we do just see if we can carry on.
       else {  
@@ -550,7 +534,7 @@ int entersession(SSL *ssl, int *clientfd, int *time) {
   while(1) {
     // Wait for the client to tell me to do something
     memset(buf, 0, sizeof(buf));
-    if (ssl_readall(ssl, buf, sizeof(buf)) < 0) {
+    if (ssl_readall(ssl, buf, 2) < 0) {
       res = FAIL;
       goto check_exit;
     }
@@ -610,12 +594,8 @@ ssize_t ssl_readall(SSL *ssl, uint8_t *buf, size_t len) {
           continue;
         }
         return FAIL;
-      } else {
-        recvd += r;
-        if (strcmp((char *)&buf[recvd-1], (char *)"\0") == 0) {
-          break;
-        }
       }
+      recvd += r;
     }
     return r;
 }
@@ -643,15 +623,17 @@ ssize_t ssl_writeall(SSL *ssl, uint8_t *msg, size_t len) {
 /**
  * Helper function to ensure the entire buffer is read from a traditional fd socket
  */
-ssize_t readall(int fd, uint8_t *buf, size_t len, size_t *total_read) {
+ssize_t readall(int fd, uint8_t *buf, size_t len) {
   ssize_t r = 0;
   size_t readin = 0;
 
   while(readin < len) {
     if ((r = read(fd, &buf[readin], len-readin)) <= 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        continue;
+      }
       break;
     }
-    (*total_read) +=r;
     readin += r;
   }
 
@@ -661,18 +643,17 @@ ssize_t readall(int fd, uint8_t *buf, size_t len, size_t *total_read) {
 /**
  * Helper function to ensure the entire buffer is written to a traditional fd socket
  */
-ssize_t writeall(int fd, uint8_t *buf, size_t len, size_t *total_written) {
+ssize_t writeall(int fd, uint8_t *buf, size_t len) {
   ssize_t w = 0;
   size_t written = 0;
   
   while(written < len) {
     if ((w = write(fd, &buf[written], len-written)) <= 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return 1;
+        continue;
       }
       break;
     }
-    (*total_written) += w;
     written += w;
   }
 
