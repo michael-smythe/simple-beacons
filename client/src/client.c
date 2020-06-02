@@ -165,7 +165,7 @@ int cmdloop(SSL* ssl) {
  */
 int newconn(SSL *ssl) {
   uint8_t ans[16] = {0};
-  char port[6];
+  char port[7];
   char addr[INET6_ADDRSTRLEN];
 
   printf("Enter the call out IP address: ");
@@ -226,6 +226,7 @@ int newconn(SSL *ssl) {
  * Future implementations will likely contain an interface that passes a pty interface back and forth over the socket.
  */
 int cmdshell(SSL *ssl) {
+  uint8_t msg[4] = {0};
   uint8_t buf[4096] = {0};
 
   // Send the command to the remote server
@@ -254,14 +255,15 @@ int cmdshell(SSL *ssl) {
     if (ssl_writeall(ssl, buf, sizeof(buf)) < 0) {return FAIL;}
 
     memset(buf, 0, sizeof(buf));
-    while((ssl_readall(ssl, buf, sizeof(buf))) > 0) {
-      if (strlen((char *)buf) == 0) {
-        SSL_read(ssl, buf, 1);
-        memset(buf, 0, sizeof(buf));
+    while(1) {
+      if (ssl_readall(ssl, msg, sizeof(msg)) < 0) {return FAIL;}
+      if (strcmp((char *)msg, "101") == 0) {
         break;
       }
+      if (ssl_readall(ssl, buf, sizeof(buf)) < 0) {return FAIL;}
       printf("%s", buf);
       memset(buf, 0, sizeof(buf));
+      memset(msg, 0, sizeof(msg));
     }
   }
 
