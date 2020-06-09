@@ -49,7 +49,7 @@ endif
 root_include = include_directories('src')
 
 # add main to sources
-root_sources = ['src/client.c']
+root_sources = ['src/client.c', 'src/comms.c', 'src/commands.c', 'src/tunnel.c']
 
 openssl = dependency('openssl')
 
